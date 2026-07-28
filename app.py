@@ -198,17 +198,19 @@ def get_sge_latest():
         return SGE_FALLBACK, True
 
 
-# ── SGE: 10-year history (cached 24h) ─────────────────────────────────────────
+# ── SGE: full history from inception (cached 24h) ─────────────────────────────
+SGE_INCEPTION_YEAR = 2006   # SGE benchmark launched Oct 30, 2006
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sge_history_10y():
     """
-    Fetch ~10 years of SGE Au99.99 data by requesting one calendar year
+    Fetch SGE Au99.99 data from inception (2006) to today, one calendar year
     at a time. Cached for 24 hours after first load.
     """
     all_rows = []
     current_year = datetime.now().year
 
-    for year in range(current_year - 9, current_year + 1):
+    for year in range(SGE_INCEPTION_YEAR, current_year + 1):
         start    = f"{year}-01-01"
         end_date = f"{year}-12-31" if year < current_year else datetime.now().strftime("%Y-%m-%d")
         url = (
@@ -234,11 +236,11 @@ def get_sge_history_10y():
     return df
 
 
-# ── COMEX: 10-year history (cached 5m) ────────────────────────────────────────
+# ── COMEX: full history (cached 5m) ───────────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def get_comex():
     ticker = yf.Ticker("GC=F")
-    hist = ticker.history(period="10y", interval="1d")
+    hist = ticker.history(period="max", interval="1d")
     hist = hist[hist["Close"] > 0].dropna(subset=["Close"])
     last = float(hist["Close"].iloc[-1])
     prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
@@ -305,7 +307,7 @@ with st.spinner("Fetching live prices…"):
 
 # SGE history — show progress message on first-ever load (cache miss)
 sge_hist_placeholder = st.empty()
-sge_hist_placeholder.caption("⏳ Loading SGE 10-year history… (first load only, cached after)")
+sge_hist_placeholder.caption("⏳ Loading SGE history from 2006… (first load only, cached 24h after)")
 sge_history = get_sge_history_10y()
 sge_hist_placeholder.empty()
 
@@ -390,10 +392,28 @@ with c3:
 st.divider()
 
 # ── Price history chart ────────────────────────────────────────────────────────
-st.subheader("Price History")
+ch_head, ch_period = st.columns([2, 5])
+with ch_head:
+    st.subheader("Price History")
+with ch_period:
+    period = st.radio(
+        "period", ["1M", "6M", "YTD", "1Y", "5Y", "All"],
+        horizontal=True, index=3, label_visibility="collapsed",
+    )
 
-sge_hist_plot = sge_history.copy()
-cx_hist_plot  = comex["history"].copy()
+# Filter data to selected period — y-axis will auto-scale to visible range
+today  = pd.Timestamp.now().normalize()
+cutoff = {
+    "1M":  today - pd.DateOffset(months=1),
+    "6M":  today - pd.DateOffset(months=6),
+    "YTD": pd.Timestamp(f"{today.year}-01-01"),
+    "1Y":  today - pd.DateOffset(years=1),
+    "5Y":  today - pd.DateOffset(years=5),
+    "All": pd.Timestamp("2006-10-30"),
+}[period]
+
+sge_hist_plot = sge_history[sge_history["date"] >= cutoff].copy()
+cx_hist_plot  = comex["history"][comex["history"]["date"] >= cutoff].copy()
 
 if use_usd:
     sge_hist_plot["price"] = sge_hist_plot["price"].apply(lambda p: cny_to_usd(p, fx))
@@ -404,23 +424,11 @@ else:
 
 # Theme colours
 if dark:
-    bg      = "#0e1117"
-    grid    = "#2a2a3a"
-    txt     = "#cccccc"
-    gold    = "#f0cc60"
-    blue    = "#60b8f0"
-    rs_bg   = "#1a1a2e"
-    rs_btn  = "#2a2a3a"
-    rs_act  = "#c9a227"
+    bg   = "#0e1117"; grid = "#2a2a3a"; txt = "#cccccc"
+    gold = "#f0cc60"; blue = "#60b8f0"
 else:
-    bg      = "white"
-    grid    = "#f0ece2"
-    txt     = "#555"
-    gold    = "#c9a227"
-    blue    = "#3a8fc0"
-    rs_bg   = "#faf9f5"
-    rs_btn  = "#eae6db"
-    rs_act  = "#c9a227"
+    bg   = "white";   grid = "#f0ece2"; txt = "#555"
+    gold = "#c9a227"; blue = "#3a8fc0"
 
 fig = go.Figure()
 
@@ -458,27 +466,12 @@ fig.update_layout(
         gridcolor=grid,
         tickformat=",.0f",
         linecolor=grid,
+        autorange=True,
     ),
     xaxis=dict(
         tickfont=dict(color=txt),
         gridcolor=grid,
         linecolor=grid,
-        rangeselector=dict(
-            bgcolor=rs_bg,
-            activecolor=rs_act,
-            bordercolor=grid,
-            borderwidth=1,
-            font=dict(color=txt, size=11),
-            buttons=[
-                dict(count=1,  label="1M",  step="month", stepmode="backward"),
-                dict(count=6,  label="6M",  step="month", stepmode="backward"),
-                dict(count=1,  label="YTD", step="year",  stepmode="todate"),
-                dict(count=1,  label="1Y",  step="year",  stepmode="backward"),
-                dict(count=5,  label="5Y",  step="year",  stepmode="backward"),
-                dict(step="all", label="10Y"),
-            ],
-        ),
-        rangeslider=dict(visible=True, bgcolor=rs_bg, bordercolor=grid, thickness=0.06),
         type="date",
     ),
     hovermode="x unified",
