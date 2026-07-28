@@ -5,24 +5,14 @@ SGE Au99.99 (physical, CNY/gram) vs COMEX GC futures (paper, USD/troy oz)
 
 DEPLOYMENT — Streamlit Community Cloud (free)
 ─────────────────────────────────────────────
-1. Create a free account at https://github.com  (if you don't have one)
-2. Create a new public repo, e.g. "gold-dashboard"
-3. Upload app.py and requirements.txt into the repo root
-4. Go to https://share.streamlit.io → "New app"
-5. Connect your GitHub repo, set Main file = app.py → Deploy
-6. Your public URL: https://<yourname>-gold-dashboard-app-<hash>.streamlit.app
+1. Push app.py + requirements.txt to a public GitHub repo
+2. Go to share.streamlit.io → New app → select repo → Main file: app.py → Deploy
 
 DATA SOURCES (all free, no API key needed)
 ──────────────────────────────────────────
 • COMEX gold price  → Yahoo Finance via yfinance (ticker: GC=F, 15-min delay)
 • USD/CNY FX rate   → Yahoo Finance via yfinance (ticker: USDCNY=X)
 • SGE Au99.99 price → scraped from en.sge.com.cn (daily benchmark, cached 1h)
-
-CACHE POLICY
-────────────
-• COMEX + FX : refreshed every 5 minutes
-• SGE        : refreshed every hour (SGE only updates once daily at ~15:30 Beijing)
-• Manual refresh via the 🔄 button clears all caches immediately
 """
 
 import streamlit as st
@@ -34,9 +24,8 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-TROY = 31.1035  # grams per troy oz
+TROY = 31.1035
 
-# Fallback SGE data used if the live scrape fails (e.g. cloud IP blocked)
 SGE_FALLBACK_HISTORY = pd.DataFrame([
     {"date": pd.Timestamp("2026-07-21"), "price": 886.95},
     {"date": pd.Timestamp("2026-07-22"), "price": 899.00},
@@ -58,23 +47,61 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown("""
+# ── Session state defaults ─────────────────────────────────────────────────────
+if "dark" not in st.session_state:
+    st.session_state.dark = False
+
+dark = st.session_state.dark
+
+# ── Theme CSS ──────────────────────────────────────────────────────────────────
+LIGHT_CSS = """
 <style>
-[data-testid="stMetricValue"] { font-size: 1.9rem !important; font-weight: 700; }
-[data-testid="stMetricDelta"] { font-size: 0.88rem; }
-.block-container { padding-top: 1.4rem !important; }
+.block-container { padding-top: 1.2rem !important; padding-bottom: 1rem !important; }
+[data-testid="stMetricValue"] { font-size: 1.85rem !important; font-weight: 700; }
+[data-testid="stMetricDelta"] { font-size: 0.85rem; }
 .gold-header {
     background: linear-gradient(135deg, #1c1c12 0%, #2a2a16 100%);
-    color: white; padding: 1.1rem 1.4rem; border-radius: 8px;
-    border-left: 4px solid #c9a227; margin-bottom: 1rem;
+    color: white; padding: 1rem 1.4rem; border-radius: 8px;
+    border-left: 4px solid #c9a227; margin-bottom: 0.6rem;
 }
-.gold-header h1 { color: #f0cc60; font-size: 1.35rem; margin: 0; }
-.gold-header p  { color: #b0a880; font-size: 0.78rem; margin: 0.3rem 0 0; }
-.meth { font-size: 0.82rem; color: #444; line-height: 1.75; }
+.gold-header h1 { color: #f0cc60; font-size: 1.3rem; margin: 0; }
+.gold-header p  { color: #b0a880; font-size: 0.76rem; margin: 0.25rem 0 0; }
+.meth { font-size: 0.81rem; color: #444; line-height: 1.75; }
 .meth a { color: #c9a227; text-decoration: none; }
 .meth a:hover { text-decoration: underline; }
 </style>
-""", unsafe_allow_html=True)
+"""
+
+DARK_CSS = """
+<style>
+.block-container { padding-top: 1.2rem !important; padding-bottom: 1rem !important; }
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
+[data-testid="stBottom"] { background-color: #0e1117 !important; }
+[data-testid="stMetricValue"] { font-size: 1.85rem !important; font-weight: 700; color: #f0cc60 !important; }
+[data-testid="stMetricDelta"] { font-size: 0.85rem; }
+[data-testid="stMetricLabel"] > div { color: #aaa !important; }
+p, li, .stMarkdown, label { color: #d0d0d0 !important; }
+h1, h2, h3, h4, h5 { color: #f5f5f5 !important; }
+[data-testid="stExpander"] { background-color: #161b22 !important; border-color: #30363d !important; }
+[data-testid="stExpanderDetails"] { background-color: #161b22 !important; }
+hr { border-color: #30363d !important; }
+[data-testid="stAlert"] { background-color: #1e2a1e !important; }
+[data-testid="stInfoAlertContent"] { color: #b0c8b0 !important; }
+[data-testid="stDataFrame"] { background-color: #161b22 !important; }
+.gold-header {
+    background: linear-gradient(135deg, #1c1c12 0%, #2a2a16 100%);
+    color: white; padding: 1rem 1.4rem; border-radius: 8px;
+    border-left: 4px solid #c9a227; margin-bottom: 0.6rem;
+}
+.gold-header h1 { color: #f0cc60; font-size: 1.3rem; margin: 0; }
+.gold-header p  { color: #b0a880; font-size: 0.76rem; margin: 0.25rem 0 0; }
+.meth { font-size: 0.81rem; color: #999; line-height: 1.75; }
+.meth a { color: #f0cc60; text-decoration: none; }
+.meth a:hover { text-decoration: underline; }
+</style>
+"""
+
+st.markdown(DARK_CSS if dark else LIGHT_CSS, unsafe_allow_html=True)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def cny_to_usd(p, fx): return p * TROY / fx
@@ -84,7 +111,6 @@ def usd_to_cny(p, fx): return p * fx / TROY
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_comex():
-    """COMEX GC front-month futures via Yahoo Finance. Cached 5 min."""
     ticker = yf.Ticker("GC=F")
     hist = ticker.history(period="45d", interval="1d")
     hist = hist[hist["Close"] > 0].dropna(subset=["Close"])
@@ -95,16 +121,10 @@ def get_comex():
     df = hist["Close"].reset_index()[["Date", "Close"]].rename(
         columns={"Date": "date", "Close": "price"})
     df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-    return {
-        "price":   round(last, 2),
-        "chg":     round(chg, 2),
-        "pct":     round(pct, 2),
-        "history": df,
-    }
+    return {"price": round(last, 2), "chg": round(chg, 2), "pct": round(pct, 2), "history": df}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fx():
-    """USD/CNY spot rate via Yahoo Finance. Cached 5 min."""
     ticker = yf.Ticker("USDCNY=X")
     hist = ticker.history(period="5d", interval="1d")
     hist = hist[hist["Close"] > 0].dropna(subset=["Close"])
@@ -112,10 +132,6 @@ def get_fx():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_sge():
-    """
-    SGE Au99.99 daily benchmark via en.sge.com.cn. Cached 1 hour.
-    Returns (data_dict, is_fallback: bool).
-    """
     end   = datetime.now()
     start = end - timedelta(days=45)
     url   = (
@@ -139,7 +155,6 @@ def get_sge():
             if "Au99.99" not in cells:
                 continue
             idx = cells.index("Au99.99")
-            # Expected order: [date, Au99.99, open, high, low, close, chg, pct%, ...]
             if idx < 1 or idx + 6 >= len(cells):
                 continue
             try:
@@ -154,13 +169,9 @@ def get_sge():
                 })
             except (ValueError, IndexError):
                 continue
-
         if not rows:
             return SGE_FALLBACK, True
-
-        df = (pd.DataFrame(rows)
-                .sort_values("date")
-                .drop_duplicates("date"))
+        df = pd.DataFrame(rows).sort_values("date").drop_duplicates("date")
         latest  = df.iloc[-1]
         history = df[["date", "close"]].rename(columns={"close": "price"})
         return {
@@ -172,7 +183,6 @@ def get_sge():
             "pct":     float(latest["pct"]),
             "history": history,
         }, False
-
     except Exception:
         return SGE_FALLBACK, True
 
@@ -180,37 +190,44 @@ def get_sge():
 st.markdown("""
 <div class="gold-header">
   <h1>🥇 Physical vs Paper Gold — Daily Benchmark</h1>
-  <p>SGE Au99.99 Spot (Shanghai · Physical · CNY/gram)&nbsp;&nbsp;vs&nbsp;&nbsp;
+  <p>SGE Gold 99.99 (Shanghai · Physical · CNY/gram) &nbsp;vs&nbsp;
      COMEX GC Futures (New York · Paper · USD/troy oz)</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Controls ───────────────────────────────────────────────────────────────────
-ctrl_l, ctrl_r = st.columns([3, 5])
-with ctrl_l:
+# ── Controls row ───────────────────────────────────────────────────────────────
+c_unit, c_dark, c_refresh, c_ts = st.columns([3.5, 1, 0.7, 4])
+
+with c_unit:
     unit = st.radio(
-        "unit", ["¥ CNY / gram", "$ USD / troy oz"],
+        "unit", ["¥ RMB / gram", "$ USD / troy oz"],
         horizontal=True, label_visibility="collapsed",
     )
-with ctrl_r:
-    rc1, rc2 = st.columns([1, 4])
-    with rc1:
-        if st.button("🔄 Refresh", type="secondary", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-    with rc2:
-        st.caption(
-            f"SGE cached 1h · COMEX + FX cached 5m · "
-            f"Last loaded {datetime.now().strftime('%b %d %Y, %H:%M')} local"
-        )
+
+with c_dark:
+    toggled = st.toggle("🌙 Dark", value=dark, key="dark_toggle")
+    if toggled != dark:
+        st.session_state.dark = toggled
+        st.rerun()
+
+with c_refresh:
+    if st.button("🔄", help="Refresh all data", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+with c_ts:
+    st.caption(
+        f"SGE cached 1h · COMEX + FX cached 5m · "
+        f"Last loaded {datetime.now().strftime('%b %d, %H:%M')}"
+    )
 
 st.divider()
 
-# ── Fetch data ─────────────────────────────────────────────────────────────────
+# ── Fetch ──────────────────────────────────────────────────────────────────────
 with st.spinner("Fetching live prices…"):
-    comex            = get_comex()
-    fx               = get_fx()
-    sge, sge_stale   = get_sge()
+    comex          = get_comex()
+    fx             = get_fx()
+    sge, sge_stale = get_sge()
 
 use_usd = "USD" in unit
 
@@ -221,39 +238,37 @@ cx_usd  = comex["price"]
 cx_cny  = usd_to_cny(cx_usd, fx)
 
 if use_usd:
-    sge_main, cx_main   = sge_usd, cx_usd
-    sge_conv, cx_conv   = sge_cny, cx_cny
-    main_fmt = lambda v: f"${v:,.2f}"
-    conv_fmt = lambda v: f"¥{v:,.2f}"
-    conv_lbl = "CNY / gram"
-    sge_delta_abs = cny_to_usd(sge["chg"], fx)
-    cx_delta_abs  = comex["chg"]
+    sge_main, cx_main = sge_usd,  cx_usd
+    sge_conv, cx_conv = sge_cny,  cx_cny
+    main_fmt  = lambda v: f"${v:,.2f}"
+    conv_fmt  = lambda v: f"¥{v:,.2f}"
+    conv_lbl  = "RMB / gram"
+    sge_delta = cny_to_usd(sge["chg"], fx)
+    cx_delta  = comex["chg"]
 else:
-    sge_main, cx_main   = sge_cny, cx_cny
-    sge_conv, cx_conv   = sge_usd, cx_usd
-    main_fmt = lambda v: f"¥{v:,.2f}"
-    conv_fmt = lambda v: f"${v:,.2f}"
-    conv_lbl = "USD / troy oz"
-    sge_delta_abs = sge["chg"]
-    cx_delta_abs  = usd_to_cny(comex["chg"], fx)
+    sge_main, cx_main = sge_cny,  cx_cny
+    sge_conv, cx_conv = sge_usd,  cx_usd
+    main_fmt  = lambda v: f"¥{v:,.2f}"
+    conv_fmt  = lambda v: f"${v:,.2f}"
+    conv_lbl  = "USD / troy oz"
+    sge_delta = sge["chg"]
+    cx_delta  = usd_to_cny(comex["chg"], fx)
 
-# Spread (always computed in CNY/g then optionally shown in USD/oz)
-spread_cny = cx_cny - sge_cny
-spread_usd = cx_usd - sge_usd
-spread_pct = spread_cny / sge_cny * 100
-spread_abs = spread_usd if use_usd else spread_cny
-spread_unit_lbl = "USD/oz" if use_usd else "CNY/g"
+spread_cny  = cx_cny - sge_cny
+spread_pct  = spread_cny / sge_cny * 100
+spread_abs  = (cx_usd - sge_usd) if use_usd else spread_cny
+spread_unit = "USD/oz" if use_usd else "RMB/g"
 
-# ── Price metrics ──────────────────────────────────────────────────────────────
+# ── Price cards ────────────────────────────────────────────────────────────────
 c1, c2, c3 = st.columns(3)
 
 with c1:
     st.markdown("##### 🏦 SGE — Physical Gold")
-    st.caption("Au99.99 Spot · Shanghai Gold Exchange · CNY/gram native")
+    st.caption("Gold 99.99 Spot · Shanghai Gold Exchange · RMB/gram native")
     st.metric(
         label="SGE Close",
         value=main_fmt(sge_main),
-        delta=f"{sge_delta_abs:+.2f}  ({sge['pct']:+.2f}%)",
+        delta=f"{sge_delta:+.2f}  ({sge['pct']:+.2f}%)",
     )
     st.caption(
         f"≈ {conv_fmt(sge_conv)} {conv_lbl}"
@@ -269,7 +284,7 @@ with c2:
     st.metric(
         label="COMEX Last",
         value=main_fmt(cx_main),
-        delta=f"{cx_delta_abs:+.2f}  ({comex['pct']:+.2f}%)",
+        delta=f"{cx_delta:+.2f}  ({comex['pct']:+.2f}%)",
     )
     st.caption(f"≈ {conv_fmt(cx_conv)} {conv_lbl}  ·  Source: Yahoo Finance (GC=F)")
 
@@ -277,22 +292,19 @@ with c3:
     st.markdown("##### 📊 Spread  (COMEX − SGE)")
     st.caption("Converted to a common unit for like-for-like comparison")
     st.metric(
-        label=f"Absolute ({spread_unit_lbl})",
+        label=f"Absolute ({spread_unit})",
         value=f"{spread_abs:+.2f}",
         delta=f"{spread_pct:+.2f}%  COMEX {'premium' if spread_pct >= 0 else 'discount'}",
         delta_color="off",
     )
     abs_pct = abs(spread_pct)
     if abs_pct < 0.5:
-        msg = "Spread within normal range — prices broadly aligned."
-        icon = "✅"
+        msg, icon = "Spread within normal range — prices broadly aligned.", "✅"
     elif spread_pct >= 0:
-        msg = f"COMEX at {abs_pct:.2f}% premium. Futures optimism or limits on physical arbitrage."
-        icon = "📈"
+        msg, icon = f"COMEX at {abs_pct:.2f}% premium. Futures optimism or limits on physical arbitrage.", "📈"
     else:
-        msg = f"SGE at {abs_pct:.2f}% premium. Strong physical demand in China or FX effects."
-        icon = "📉"
-    st.info(f"{icon} {msg}")
+        msg, icon = f"SGE at {abs_pct:.2f}% premium. Strong physical demand in China or FX effects.", "📉"
+    st.info(f"{icon}  {msg}")
     st.caption(f"USD/CNY: **{fx}**  ·  1 troy oz = 31.1035 g")
 
 st.divider()
@@ -305,52 +317,85 @@ cx_hist  = comex["history"].copy()
 
 if use_usd:
     sge_hist["price"] = sge_hist["price"].apply(lambda p: cny_to_usd(p, fx))
-    y_title = "USD / troy oz"
-    hover_fmt = "$%{y:,.2f}"
+    y_title, hover_fmt = "USD / troy oz", "$%{y:,.2f}"
 else:
     cx_hist["price"] = cx_hist["price"].apply(lambda p: usd_to_cny(p, fx))
-    y_title = "CNY / gram"
-    hover_fmt = "¥%{y:,.2f}"
+    y_title, hover_fmt = "RMB / gram", "¥%{y:,.2f}"
+
+# Theme-aware chart colors
+if dark:
+    bg_color    = "#0e1117"
+    grid_color  = "#2a2a3a"
+    text_color  = "#cccccc"
+    gold_line   = "#f0cc60"
+    blue_line   = "#60b8f0"
+else:
+    bg_color    = "white"
+    grid_color  = "#f0ece2"
+    text_color  = "#555555"
+    gold_line   = "#c9a227"
+    blue_line   = "#3a8fc0"
 
 fig = go.Figure()
 
 fig.add_trace(go.Scatter(
     x=sge_hist["date"], y=sge_hist["price"],
-    name="SGE Au99.99 (Physical)",
-    line=dict(color="#c9a227", width=2.5),
+    name="SGE Gold 99.99 (Physical)",
+    line=dict(color=gold_line, width=2.5),
     mode="lines+markers",
-    marker=dict(size=5, color="#c9a227"),
+    marker=dict(size=5, color=gold_line),
     hovertemplate=f"SGE: {hover_fmt}<extra></extra>",
 ))
 
 fig.add_trace(go.Scatter(
     x=cx_hist["date"], y=cx_hist["price"],
     name="COMEX GC (Paper)",
-    line=dict(color="#3a8fc0", width=2.5),
+    line=dict(color=blue_line, width=2.5),
     mode="lines",
     hovertemplate=f"COMEX: {hover_fmt}<extra></extra>",
 ))
 
 fig.update_layout(
     height=340,
-    margin=dict(l=0, r=0, t=10, b=0),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=12)),
-    yaxis=dict(title=y_title, gridcolor="#f0ece2", tickformat=",.0f"),
-    xaxis=dict(gridcolor="#f0ece2"),
+    margin=dict(l=0, r=10, t=10, b=0),
+    plot_bgcolor=bg_color,
+    paper_bgcolor=bg_color,
+    font=dict(color=text_color, size=12),
+    legend=dict(
+        orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+        font=dict(size=12, color=text_color),
+        bgcolor="rgba(0,0,0,0)",
+    ),
+    yaxis=dict(
+        title=y_title,
+        title_font=dict(color=text_color),
+        tickfont=dict(color=text_color),
+        gridcolor=grid_color,
+        tickformat=",.0f",
+        linecolor=grid_color,
+    ),
+    xaxis=dict(
+        tickfont=dict(color=text_color),
+        gridcolor=grid_color,
+        linecolor=grid_color,
+    ),
     hovermode="x unified",
+    hoverlabel=dict(
+        bgcolor="#1c1c12" if dark else "#fff8e6",
+        font_color="#f0cc60" if dark else "#333",
+        bordercolor=gold_line,
+    ),
 )
 st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
-# ── SGE daily table ────────────────────────────────────────────────────────────
-with st.expander("📋 SGE Au99.99 Daily Close Table"):
-    df_tbl = sge["history"].copy().sort_values("date", ascending=False).copy()
+# ── History table ──────────────────────────────────────────────────────────────
+with st.expander("📋 SGE Gold 99.99 Daily Close Table"):
+    df_tbl = sge["history"].copy().sort_values("date", ascending=False)
     df_tbl["USD / troy oz"] = df_tbl["price"].apply(lambda p: round(cny_to_usd(p, fx), 2))
     df_tbl["date"] = df_tbl["date"].dt.strftime("%Y-%m-%d")
-    df_tbl = df_tbl.rename(columns={"date": "Date", "price": "SGE Close (CNY/g)"})
+    df_tbl = df_tbl.rename(columns={"date": "Date", "price": "SGE Close (RMB/g)"})
     st.dataframe(df_tbl, use_container_width=True, hide_index=True)
 
 # ── Methodology ────────────────────────────────────────────────────────────────
@@ -365,8 +410,8 @@ and the world's largest physical gold market by volume. All gold traded on the S
 mandatory physical delivery into SGE-certified vaults — making it a true physical benchmark.<br><br>
 The <strong>Shanghai Gold Benchmark Price (SHAU)</strong> is set via a twice-daily electronic
 auction: AM session (~10:15 Beijing) and PM session (~14:30 Beijing). This dashboard uses
-the <strong>Au99.99 spot contract</strong> — 99.99% fine gold, denominated in
-<strong>CNY per gram</strong>.<br><br>
+the <strong>Gold 99.99 spot contract</strong> — 99.99% fine gold, denominated in
+<strong>RMB per gram</strong>.<br><br>
 <strong>Market hours (Beijing / UTC+8):</strong> Night 20:00–02:30 · Day 09:00–15:30.
 Closed weekends and Chinese public holidays.<br><br>
 <a href="https://en.sge.com.cn/data_BenchmarkPrice" target="_blank">
@@ -385,7 +430,7 @@ cash-settled or rolled forward. COMEX reflects <em>financial market expectations
 flows</em>, not immediate physical supply/demand.<br><br>
 <strong>Market hours (US Eastern):</strong> Sunday 6 PM – Friday 5 PM with a 60-min daily
 break. Near-continuous 5-day coverage.<br><br>
-Price sourced via <strong>Yahoo Finance</strong> (ticker: GC=F, ~15-min delay on free tier).
+Price sourced via <strong>Yahoo Finance</strong> (ticker: GC=F, ~15-min delay).
 </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
@@ -394,23 +439,23 @@ Price sourced via <strong>Yahoo Finance</strong> (ticker: GC=F, ~15-min delay on
     with fc1:
         st.markdown("**🔄 Conversion Formula**")
         st.markdown("""<div class="meth">
-<strong>CNY/gram → USD/troy oz:</strong><br>
-Price (USD/oz) = Price (CNY/g) × 31.1035 ÷ USD/CNY<br><br>
-<strong>USD/troy oz → CNY/gram:</strong><br>
-Price (CNY/g) = Price (USD/oz) × USD/CNY ÷ 31.1035<br><br>
-FX rate is the live USD/CNY spot sourced from Yahoo Finance (USDCNY=X), refreshed every 5 minutes.
-Real cross-market arbitrage additionally involves ~13% Chinese VAT on gold imports/exports,
-transport, insurance, and settlement lag — so observed spreads often exceed any actionable
-arbitrage bandwidth.
+<strong>RMB/gram → USD/troy oz:</strong><br>
+Price (USD/oz) = Price (RMB/g) × 31.1035 ÷ USD/CNY<br><br>
+<strong>USD/troy oz → RMB/gram:</strong><br>
+Price (RMB/g) = Price (USD/oz) × USD/CNY ÷ 31.1035<br><br>
+FX rate is the live USD/CNY spot sourced from Yahoo Finance (USDCNY=X), refreshed every
+5 minutes. Real cross-market arbitrage additionally involves ~13% Chinese VAT, transport,
+insurance, and settlement lag.
 </div>""", unsafe_allow_html=True)
 
     with fc2:
         st.markdown("**⚠️ Disclaimer**")
         st.markdown("""<div class="meth">
-This dashboard is for <strong>informational and educational purposes only</strong> — it is
-not financial, investment, or trading advice. Prices carry a delay and are sourced from
-third-party aggregators (Yahoo Finance, en.sge.com.cn).<br><br>
-Verify prices with official sources (<a href="https://en.sge.com.cn" target="_blank">en.sge.com.cn</a>,
+For <strong>informational and educational purposes only</strong> — not financial,
+investment, or trading advice. Prices carry a delay and are sourced from third-party
+aggregators (Yahoo Finance, en.sge.com.cn).<br><br>
+Verify with official sources
+(<a href="https://en.sge.com.cn" target="_blank">en.sge.com.cn</a>,
 <a href="https://www.cmegroup.com/markets/metals/precious/gold.html" target="_blank">cmegroup.com</a>)
-before making any financial decision. Past spreads are not indicative of future spreads.
+before any financial decision.
 </div>""", unsafe_allow_html=True)
