@@ -33,7 +33,8 @@ import plotly.graph_objects as go
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 TROY = 31.1035
-FRED_DEXCHUS = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DEXCHUS"
+FRED_DEXCHUS   = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DEXCHUS"
+FRED_GOLD_LBMA = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GOLDPMGBD228NLBM"
 
 SGE_FALLBACK_HISTORY = pd.DataFrame([
     {"date": pd.Timestamp("2024-01-02"), "price": 476.36},
@@ -201,32 +202,54 @@ def get_sge_latest():
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sge_history_actual():
     """
-    Fetch actual SGE Au99.99 data from Jan 2024 onwards.
-    SGE's API only serves data from 2024-01-01 — earlier dates return empty tables.
+    Actual SGE Au99.99 daily closes (Jan 2024+).
+    Primary: bundled sge_history_2024_2026.csv (full daily history, reliable).
+    Extended: SGE English API for any trading days after the CSV's last entry.
+
+    The old approach (one API call per year) only retrieved page 1 = ~2 days
+    per year due to server-side pagination. The CSV fixes that entirely.
     """
-    all_rows = []
-    current_year = datetime.now().year
-    for year in range(2024, current_year + 1):
-        start    = f"{year}-01-01"
-        end_date = f"{year}-12-31" if year < current_year else datetime.now().strftime("%Y-%m-%d")
+    import os
+
+    # 1. Load bundled CSV -------------------------------------------------------
+    csv_path = os.path.join(os.path.dirname(__file__), "sge_history_2024_2026.csv")
+    try:
+        df_csv = pd.read_csv(csv_path, parse_dates=["date"])
+        df_csv = df_csv.rename(columns={"close_rmb_g": "price"})
+        df_csv["date"] = pd.to_datetime(df_csv["date"]).dt.normalize()
+    except Exception:
+        df_csv = pd.DataFrame(columns=["date", "price"])
+
+    csv_end = df_csv["date"].max() if not df_csv.empty else pd.Timestamp("2023-12-31")
+
+    # 2. Extend with live SGE API for dates after the CSV ----------------------
+    start_live = (csv_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    end_live   = datetime.now().strftime("%Y-%m-%d")
+    live_rows  = []
+    if start_live <= end_live:
         url = (
             "https://en.sge.com.cn/data/data_daily_international_new"
-            f"?start_date={start}&end_date={end_date}"
+            f"?start_date={start_live}&end_date={end_live}"
         )
         try:
             r = requests.get(url, headers=SGE_HEADERS, timeout=15)
             r.raise_for_status()
-            all_rows.extend(_parse_sge_html(r.text))
-            time.sleep(0.4)
+            live_rows = _parse_sge_html(r.text)
         except Exception:
-            continue
-    if not all_rows:
-        return SGE_FALLBACK_HISTORY
-    return (pd.DataFrame(all_rows)
+            pass
+
+    if live_rows:
+        df_live = (pd.DataFrame(live_rows)
+                     [["date", "close"]]
+                     .rename(columns={"close": "price"}))
+        df_live["date"] = pd.to_datetime(df_live["date"]).dt.normalize()
+    else:
+        df_live = pd.DataFrame(columns=["date", "price"])
+
+    return (pd.concat([df_csv, df_live], ignore_index=True)
               .sort_values("date")
               .drop_duplicates("date")
-              [["date", "close"]]
-              .rename(columns={"close": "price"}))
+              .reset_index(drop=True))
 
 
 # ── SGE actual history Dec 2016+ via graph API (cached 24h) ──────────────────
@@ -274,29 +297,120 @@ def get_fx_history_fred():
         return pd.DataFrame(columns=["date", "fx"])
 
 
-# ── COMEX full history (cached 5m) ────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
-def get_comex():
-    ticker = yf.Ticker("GC=F")
-    hist   = ticker.history(period="max", interval="1d")
-    hist   = hist[hist["Close"] > 0].dropna(subset=["Close"])
-    last   = float(hist["Close"].iloc[-1])
-    prev   = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
-    chg    = last - prev
-    pct    = chg / prev * 100
-    df = hist["Close"].reset_index()[["Date", "Close"]].rename(
-        columns={"Date": "date", "Close": "price"})
-    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-    return {"price": round(last, 2), "chg": round(chg, 2), "pct": round(pct, 2), "history": df}
+# ── LBMA/COMEX gold history from FRED (cached 24h) ───────────────────────────
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_gold_history_fred():
+    """
+    LBMA PM gold price from FRED (GOLDPMGBD228NLBM) — USD/troy oz, daily from 1968.
+    Used for the chart history and as fallback for live COMEX price.
+    LBMA PM and COMEX GC settle within ~$1 of each other on any given day.
+    """
+    try:
+        df = pd.read_csv(FRED_GOLD_LBMA, parse_dates=["DATE"])
+        df.columns = ["date", "price"]
+        df = df[df["price"] != "."].copy()
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df = df.dropna(subset=["price"]).sort_values("date").reset_index(drop=True)
+        df["date"] = pd.to_datetime(df["date"])
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["date", "price"])
 
 
-# ── FX live rate (cached 5m) ──────────────────────────────────────────────────
+# ── Recent COMEX history from yfinance (cached 1h) — bridges FRED lag ─────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_gold_history_recent():
+    """
+    Recent 6-month GC=F history from yfinance to fill any FRED LBMA lag.
+    Falls back gracefully — FRED alone is usually current enough (1-2 day lag).
+    """
+    try:
+        ticker = yf.Ticker("GC=F")
+        hist   = ticker.history(period="6mo", interval="1d")
+        hist   = hist[hist["Close"] > 0].dropna(subset=["Close"])
+        if hist.empty:
+            raise ValueError("empty")
+        idx = hist.index
+        if hasattr(idx, "tz") and idx.tz is not None:
+            idx = idx.tz_localize(None)
+        df = pd.DataFrame({"date": idx, "price": hist["Close"].values})
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        return df[["date", "price"]].sort_values("date").drop_duplicates("date").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["date", "price"])
+
+
+# ── Recent FX history from yfinance (cached 1h) — bridges FRED DEXCHUS lag ────
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fx_history_recent():
+    """
+    Recent 6-month USDCNY=X history from yfinance to fill any FRED DEXCHUS lag.
+    Falls back gracefully — FRED DEXCHUS typically lags < 1 week.
+    """
+    try:
+        ticker = yf.Ticker("USDCNY=X")
+        hist   = ticker.history(period="6mo", interval="1d")
+        hist   = hist[hist["Close"] > 0].dropna(subset=["Close"])
+        if hist.empty:
+            raise ValueError("empty")
+        idx = hist.index
+        if hasattr(idx, "tz") and idx.tz is not None:
+            idx = idx.tz_localize(None)
+        df = pd.DataFrame({"date": idx, "fx": hist["Close"].values})
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        return df[["date", "fx"]].sort_values("date").drop_duplicates("date").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["date", "fx"])
+
+
+# ── COMEX live price (cached 5m) — yfinance with FRED fallback ────────────────
 @st.cache_data(ttl=300, show_spinner=False)
-def get_fx():
-    ticker = yf.Ticker("USDCNY=X")
-    hist   = ticker.history(period="5d", interval="1d")
-    hist   = hist[hist["Close"] > 0].dropna(subset=["Close"])
-    return round(float(hist["Close"].iloc[-1]), 4)
+def get_comex_live():
+    """
+    Live COMEX GC=F price from yfinance.
+    Falls back to FRED LBMA latest if Yahoo Finance rate-limits or errors.
+    """
+    try:
+        ticker = yf.Ticker("GC=F")
+        hist   = ticker.history(period="5d", interval="1d")
+        hist   = hist[hist["Close"] > 0].dropna(subset=["Close"])
+        if hist.empty:
+            raise ValueError("No data returned")
+        last = float(hist["Close"].iloc[-1])
+        prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
+        chg  = last - prev
+        pct  = chg / prev * 100
+        return {"price": round(last, 2), "chg": round(chg, 2), "pct": round(pct, 2), "stale": False}
+    except Exception:
+        gold = get_gold_history_fred()
+        if gold.empty:
+            return {"price": 3300.0, "chg": 0.0, "pct": 0.0, "stale": True}
+        last = float(gold["price"].iloc[-1])
+        prev = float(gold["price"].iloc[-2]) if len(gold) > 1 else last
+        chg  = last - prev
+        pct  = chg / prev * 100
+        return {"price": round(last, 2), "chg": round(chg, 2), "pct": round(pct, 2), "stale": True}
+
+
+# ── FX live rate (cached 5m) — yfinance with FRED fallback ───────────────────
+@st.cache_data(ttl=300, show_spinner=False)
+def get_fx_live():
+    """
+    Live USD/CNY from yfinance (USDCNY=X).
+    Falls back to FRED DEXCHUS latest if Yahoo Finance rate-limits or errors.
+    """
+    try:
+        ticker = yf.Ticker("USDCNY=X")
+        hist   = ticker.history(period="5d", interval="1d")
+        hist   = hist[hist["Close"] > 0].dropna(subset=["Close"])
+        if hist.empty:
+            raise ValueError("No data returned")
+        return round(float(hist["Close"].iloc[-1]), 4), False
+    except Exception:
+        fx_hist = get_fx_history_fred()
+        if fx_hist.empty:
+            return 7.25, True
+        return round(float(fx_hist["fx"].iloc[-1]), 4), True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -327,23 +441,42 @@ with c_refresh:
         st.cache_data.clear()
         st.rerun()
 with c_ts:
-    st.caption(f"SGE 1h · History 24h · COMEX + FX 5m · "
+    st.caption(f"SGE 1h · History 24h · COMEX/FX 5m (FRED fallback if rate-limited) · "
                f"Last loaded {datetime.now().strftime('%b %d, %H:%M')}")
 
 st.divider()
 
 # ── Fetch ──────────────────────────────────────────────────────────────────────
 with st.spinner("Fetching live prices…"):
-    comex          = get_comex()
-    fx             = get_fx()
+    comex          = get_comex_live()
+    fx, fx_stale   = get_fx_live()
     sge, sge_stale = get_sge_latest()
 
 _ph = st.empty()
 _ph.caption("⏳ Loading historical data… (first load only, cached 24h after)")
-sge_graph   = get_sge_history_graph_api()   # Dec 2016 – present (actual)
-sge_actual  = get_sge_history_actual()       # Jan 2024 – present (actual, high-freq)
-fx_hist     = get_fx_history_fred()
+sge_graph       = get_sge_history_graph_api()   # Dec 2016 – present (actual, Chinese API)
+sge_actual      = get_sge_history_actual()       # Jan 2024 – present (actual, English API)
+fx_hist_fred    = get_fx_history_fred()          # FRED DEXCHUS long history
+fx_hist_recent  = get_fx_history_recent()        # yfinance bridge for FRED lag
+gold_hist_fred  = get_gold_history_fred()        # FRED LBMA long history
+gold_hist_recent = get_gold_history_recent()     # yfinance bridge for FRED lag
 _ph.empty()
+
+# Merge FRED + yfinance to get continuous COMEX and FX history up to today
+def _merge_history(base, recent, val_col):
+    if base.empty and recent.empty:
+        return pd.DataFrame(columns=["date", val_col])
+    if base.empty:
+        return recent
+    if recent.empty:
+        return base
+    fred_end  = base["date"].max()
+    bridge    = recent[recent["date"] > fred_end]
+    merged    = pd.concat([base, bridge], ignore_index=True)
+    return merged.sort_values("date").drop_duplicates("date").reset_index(drop=True)
+
+gold_history = _merge_history(gold_hist_fred, gold_hist_recent, "price")
+fx_hist      = _merge_history(fx_hist_fred,  fx_hist_recent,  "fx")
 
 # Merge: graph API covers Dec 2016 – Dec 2023; English API covers Jan 2024+
 # Combined → full actual SGE series from Dec 2016 onwards
@@ -353,8 +486,11 @@ else:
     sge_graph_pre2024 = pd.DataFrame(columns=["date", "price"])
 sge_actual_combined = (pd.concat([sge_graph_pre2024, sge_actual], ignore_index=True)
                          .sort_values("date").drop_duplicates("date").reset_index(drop=True))
-# Threshold for estimation: before Dec 2016 = estimated, Dec 2016+ = actual
-SGE_ACTUAL_START = pd.Timestamp("2016-12-19")
+# Threshold for estimation: everything before the earliest actual SGE date gets estimated.
+# If graph API worked → Dec 2016. If graph API failed → Jan 2024. Never leaves a gap.
+SGE_ACTUAL_START = (sge_actual_combined["date"].min()
+                    if not sge_actual_combined.empty
+                    else pd.Timestamp("2024-01-01"))
 
 use_usd = "USD" in unit
 
@@ -401,10 +537,13 @@ with c1:
 
 with c2:
     st.markdown("##### 📜 COMEX — Paper Gold")
-    st.caption("GC Front Month · CME Group · USD/troy oz native · 15-min delay")
+    src_label = "FRED LBMA PM (prev. day)" if comex["stale"] else "Yahoo Finance GC=F"
+    st.caption(f"GC Front Month · CME Group · USD/troy oz native · Source: {src_label}")
     st.metric("COMEX Last", main_fmt(cx_main),
               delta=f"{cx_delta:+.2f}  ({comex['pct']:+.2f}%)")
-    st.caption(f"≈ {conv_fmt(cx_conv)} {conv_lbl}  ·  Source: Yahoo Finance (GC=F)")
+    st.caption(f"≈ {conv_fmt(cx_conv)} {conv_lbl}")
+    if comex["stale"]:
+        st.warning("Yahoo Finance rate-limited — showing FRED LBMA PM (prev. business day)", icon="⚠️")
 
 with c3:
     st.markdown("##### 📊 Spread  (COMEX − SGE)")
@@ -420,7 +559,8 @@ with c3:
     else:
         msg, icon = f"SGE at {abs_pct:.2f}% premium. Strong physical demand in China or FX effects.", "📉"
     st.info(f"{icon}  {msg}")
-    st.caption(f"USD/CNY: **{fx}** (live)  ·  1 troy oz = 31.1035 g")
+    fx_src = "FRED DEXCHUS (prev. day)" if fx_stale else "live"
+    st.caption(f"USD/CNY: **{fx}** ({fx_src})  ·  1 troy oz = 31.1035 g")
 
 st.divider()
 
@@ -442,23 +582,30 @@ cutoff = {
     "All": pd.Timestamp("2006-10-30"),
 }[period]
 
-# ── Build SGE estimated history (pre-Dec 2016 only) ───────────────────────────
-# Merge COMEX daily price with FRED daily USD/CNY to get CNY/gram estimate
-cx_all = comex["history"].copy()
+# ── Build SGE estimated history ─────────────────────────────────────────────────
+# Estimated = COMEX/LBMA × FRED DEXCHUS ÷ 31.1035 for all dates where actual
+# SGE data is unavailable. Actual SGE data (where fetched) takes priority.
+cx_all = gold_history.copy()
 cx_all["date"] = pd.to_datetime(cx_all["date"]).dt.normalize()
+
+SGE_INCEPTION = pd.Timestamp("2006-10-30")
 
 if not fx_hist.empty:
     fx_daily = fx_hist.copy()
     fx_daily["date"] = pd.to_datetime(fx_daily["date"]).dt.normalize()
-    # Forward-fill weekends/holidays in FX (FRED is business days only)
+    # Forward-fill weekends/holidays in FX (sources are business days only)
     full_idx = pd.date_range(fx_daily["date"].min(), fx_daily["date"].max(), freq="D")
     fx_daily = fx_daily.set_index("date").reindex(full_idx).ffill().reset_index()
     fx_daily.columns = ["date", "fx"]
     sge_est = cx_all.merge(fx_daily, on="date", how="inner")
     sge_est["price"] = sge_est["price"] * sge_est["fx"] / TROY
     sge_est = sge_est[["date", "price"]]
-    # Only estimate pre-Dec 2016 — actual SGE data covers Dec 2016 onwards
-    sge_est = sge_est[sge_est["date"] < SGE_ACTUAL_START]
+    # Apply SGE inception filter (exchange opened Oct 30, 2006)
+    sge_est = sge_est[sge_est["date"] >= SGE_INCEPTION]
+    # Remove dates that are covered by actual SGE data (no double-counting)
+    if not sge_actual_combined.empty:
+        actual_dates = set(sge_actual_combined["date"].dt.normalize())
+        sge_est = sge_est[~sge_est["date"].isin(actual_dates)]
 else:
     sge_est = pd.DataFrame(columns=["date", "price"])
 
@@ -489,7 +636,7 @@ fig = go.Figure()
 if not sge_est_plot.empty:
     fig.add_trace(go.Scatter(
         x=sge_est_plot["date"], y=sge_est_plot["price"],
-        name="SGE Est. (pre-2017, COMEX × FRED FX)",
+        name="SGE Estimated (COMEX × FRED FX, where actual unavailable)",
         line=dict(color=gold, width=1.5, dash="dot"),
         mode="lines",
         opacity=0.65,
@@ -506,13 +653,13 @@ if not sge_actual_plot.empty:
         hovertemplate=f"SGE actual: {hover_fmt}<extra></extra>",
     ))
 
-# Trace 3: COMEX — blue
+# Trace 3: COMEX/LBMA — blue
 fig.add_trace(go.Scatter(
     x=cx_plot["date"], y=cx_plot["price"],
-    name="COMEX GC (Paper)",
+    name="COMEX/LBMA Paper Gold (USD/oz)",
     line=dict(color=blue, width=2),
     mode="lines",
-    hovertemplate=f"COMEX: {hover_fmt}<extra></extra>",
+    hovertemplate=f"COMEX/LBMA: {hover_fmt}<extra></extra>",
 ))
 
 fig.update_layout(
@@ -533,9 +680,15 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 if not sge_est_plot.empty:
+    if not sge_actual_combined.empty:
+        a_start = sge_actual_combined["date"].min().strftime("%b %Y")
+        a_end   = sge_actual_combined["date"].max().strftime("%b %Y")
+        est_note = f"Solid gold = actual SGE Au99.99 ({a_start} – {a_end})."
+    else:
+        est_note = "Actual SGE data unavailable — full series is estimated."
     st.caption(
-        "⚠️ Dotted gold line = SGE estimated pre-2017: COMEX price × FRED DEXCHUS USD/CNY ÷ 31.1035. "
-        "Solid gold line = actual SGE Au99.99 data from Dec 19, 2016 onwards."
+        f"⚠️ Dotted gold = SGE estimated (COMEX/LBMA × FRED DEXCHUS USD/CNY ÷ 31.1035) "
+        f"for all dates without actual SGE data. {est_note}"
     )
 
 st.divider()
@@ -604,19 +757,18 @@ insurance, and settlement lag.
 </div>""", unsafe_allow_html=True)
 
     with fc2:
-        st.markdown("**⚠️ Pre-2017 Estimate Methodology**")
+        st.markdown("**⚠️ Estimated Series Methodology**")
         st.markdown("""<div class="meth">
-Actual SGE data is available from <strong>Dec 19, 2016</strong> onwards via SGE's graph API
-(<code>sge.com.cn/graph/Dailyhq</code>). For earlier dates (Oct 2006 – Dec 2016),
-prices are estimated as:<br>
-<em>SGE est. (RMB/g) = COMEX (USD/oz) × FRED DEXCHUS ÷ 31.1035</em><br><br>
-This covers only ~10 years on the far left of the "All" chart view (dotted line).
-The LBMA/COMEX spot price closely tracks SGE Au99.99 with a typical spread of less than 1%,
-so the long-run trend is representative. Spreads may widen during periods of strong Chinese
-domestic demand or cross-border capital controls.<br><br>
-Verify with official sources
-(<a href="https://en.sge.com.cn" target="_blank">en.sge.com.cn</a>,
-<a href="https://www.cmegroup.com/markets/metals/precious/gold.html" target="_blank">cmegroup.com</a>,
-<a href="https://fred.stlouisfed.org/series/DEXCHUS" target="_blank">fred.stlouisfed.org</a>)
-before any financial decision.
+Actual SGE Au99.99 data is available from <strong>Dec 19, 2016</strong> via SGE's graph API
+(<code>sge.com.cn/graph/Dailyhq</code>). For <strong>Oct 2006 – Dec 2016</strong>, prices are estimated:<br>
+<em>SGE est. (RMB/g) = LBMA PM (USD/oz) × FRED DEXCHUS ÷ 31.1035</em><br><br>
+If the graph API is unreachable (Chinese server, US-hosted app), the estimation
+automatically extends to cover the gap up to Jan 2024, so the chart never shows a blank
+stretch. The estimated dotted line and solid actual line meet seamlessly at whatever
+date actual data begins.<br><br>
+LBMA PM and COMEX GC settle within ~$1 of each other daily. The COMEX/LBMA price
+closely tracks SGE Au99.99 with a typical spread under 1%, so the long-run trend is
+representative. Spreads may widen during periods of strong Chinese physical demand.<br><br>
+Historical LBMA PM price sourced from <a href="https://fred.stlouisfed.org/series/GOLDPMGBD228NLBM"
+target="_blank">FRED GOLDPMGBD228NLBM</a>. Verify before any financial decision.
 </div>""", unsafe_allow_html=True)
