@@ -479,14 +479,13 @@ def _merge_history(base, recent, val_col):
 gold_history = _merge_history(gold_hist_recent, gold_hist_fred, "price")  # yfinance full history base, FRED fills any gap
 fx_hist      = _merge_history(fx_hist_fred,  fx_hist_recent,  "fx")
 
-# Merge: graph API covers Dec 2016 – Dec 2023; English API covers Jan 2024+
-# Combined → full actual SGE series from Dec 2016 onwards
-if not sge_graph.empty:
-    sge_graph_pre2024 = sge_graph[sge_graph["date"] < pd.Timestamp("2024-01-01")]
-else:
-    sge_graph_pre2024 = pd.DataFrame(columns=["date", "price"])
-sge_actual_combined = (pd.concat([sge_graph_pre2024, sge_actual], ignore_index=True)
-                         .sort_values("date").drop_duplicates("date").reset_index(drop=True))
+# Merge: graph API covers Dec 2016 – present in one call.
+# English API + CSV covers Jan 2024+ and is more granular — it wins on any date overlap.
+# Use graph API for ALL dates (not just pre-2024), so recent months are always covered
+# even if the CSV hasn't been updated or the live extension fails.
+sge_actual_combined = (pd.concat([sge_graph, sge_actual], ignore_index=True)
+                         .sort_values("date").drop_duplicates("date", keep="last")
+                         .reset_index(drop=True))
 # Threshold for estimation: everything before the earliest actual SGE date gets estimated.
 # If graph API worked → Dec 2016. If graph API failed → Jan 2024. Never leaves a gap.
 SGE_ACTUAL_START = (sge_actual_combined["date"].min()
