@@ -317,16 +317,17 @@ def get_gold_history_fred():
         return pd.DataFrame(columns=["date", "price"])
 
 
-# ── Recent COMEX history from yfinance (cached 1h) — bridges FRED lag ─────────
-@st.cache_data(ttl=3600, show_spinner=False)
+# ── Full COMEX history from yfinance (cached 24h) — primary source ────────────
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_gold_history_recent():
     """
-    Recent 6-month GC=F history from yfinance to fill any FRED LBMA lag.
-    Falls back gracefully — FRED alone is usually current enough (1-2 day lag).
+    Full GC=F history from yfinance (period='max' — goes back to ~1975).
+    This is the primary COMEX source; FRED LBMA fills any gaps on recent dates
+    where yfinance may lag. Cached 24h since history rarely changes intraday.
     """
     try:
         ticker = yf.Ticker("GC=F")
-        hist   = ticker.history(period="6mo", interval="1d")
+        hist   = ticker.history(period="max", interval="1d")
         hist   = hist[hist["Close"] > 0].dropna(subset=["Close"])
         if hist.empty:
             raise ValueError("empty")
@@ -475,7 +476,7 @@ def _merge_history(base, recent, val_col):
     merged    = pd.concat([base, bridge], ignore_index=True)
     return merged.sort_values("date").drop_duplicates("date").reset_index(drop=True)
 
-gold_history = _merge_history(gold_hist_fred, gold_hist_recent, "price")
+gold_history = _merge_history(gold_hist_recent, gold_hist_fred, "price")  # yfinance full history base, FRED fills any gap
 fx_hist      = _merge_history(fx_hist_fred,  fx_hist_recent,  "fx")
 
 # Merge: graph API covers Dec 2016 – Dec 2023; English API covers Jan 2024+
