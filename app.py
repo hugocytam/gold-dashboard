@@ -772,3 +772,59 @@ representative. Spreads may widen during periods of strong Chinese physical dema
 Historical LBMA PM price sourced from <a href="https://fred.stlouisfed.org/series/GOLDPMGBD228NLBM"
 target="_blank">FRED GOLDPMGBD228NLBM</a>. Verify before any financial decision.
 </div>""", unsafe_allow_html=True)
+
+# ── Data verification & export ─────────────────────────────────────────────────
+with st.expander("🔬 Data Verification & Export (SGE vs COMEX matched)"):
+    if not sge_actual_combined.empty and not cx_all.empty and not fx_hist.empty:
+        # Build matched dataset
+        _sge = sge_actual_combined.copy()
+        _sge["date"] = pd.to_datetime(_sge["date"]).dt.normalize()
+        _cx  = cx_all.copy()
+        _cx["date"] = pd.to_datetime(_cx["date"]).dt.normalize()
+        _fx  = fx_hist.copy()
+        _fx["date"] = pd.to_datetime(_fx["date"]).dt.normalize()
+        # Fill FX forward so weekends don't drop
+        full_idx = pd.date_range(_fx["date"].min(), _fx["date"].max(), freq="D")
+        _fx = _fx.set_index("date").reindex(full_idx).ffill().reset_index()
+        _fx.columns = ["date", "fx"]
+
+        merged = (_sge
+                  .rename(columns={"price": "sge_cny_g"})
+                  .merge(_cx.rename(columns={"price": "comex_usd_oz"}), on="date", how="inner")
+                  .merge(_fx, on="date", how="left")
+                  .dropna())
+        merged["comex_cny_g"] = merged["comex_usd_oz"] * merged["fx"] / TROY
+        merged["spread_cny"]  = merged["sge_cny_g"] - merged["comex_cny_g"]
+        merged["spread_pct"]  = merged["spread_cny"] / merged["comex_cny_g"] * 100
+        merged = merged.sort_values("date").reset_index(drop=True)
+
+        # Summary stats
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Matched rows", f"{len(merged):,}")
+        sc2.metric("Avg SGE premium", f"{merged['spread_pct'].mean():+.2f}%")
+        sc3.metric("Median spread", f"{merged['spread_pct'].median():+.2f}%")
+        outliers = merged[merged["spread_pct"].abs() > 15]
+        sc4.metric("Outliers >15%", len(outliers), delta="⚠️ check" if len(outliers) else "✓ clean", delta_color="inverse" if len(outliers) else "off")
+
+        st.caption(f"Date range: {merged['date'].min().date()} → {merged['date'].max().date()}")
+
+        # Yearly avg spread
+        yr = merged.groupby(merged["date"].dt.year)["spread_pct"].mean().reset_index()
+        yr.columns = ["Year", "Avg SGE premium (%)"]
+        yr["Avg SGE premium (%)"] = yr["Avg SGE premium (%)"].round(2)
+        st.dataframe(yr, use_container_width=False, hide_index=True)
+
+        if not outliers.empty:
+            st.warning(f"⚠️ {len(outliers)} rows with >15% spread — may indicate data errors:")
+            st.dataframe(outliers[["date","sge_cny_g","comex_cny_g","spread_pct"]].assign(date=outliers["date"].dt.date), hide_index=True)
+
+        # Download button
+        csv_bytes = merged.assign(date=merged["date"].dt.strftime("%Y-%m-%d")).to_csv(index=False).encode()
+        st.download_button(
+            label="⬇️ Download matched CSV (SGE + COMEX + FX)",
+            data=csv_bytes,
+            file_name="sge_comex_matched.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("Historical data not fully loaded — refresh the page and try again.")
