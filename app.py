@@ -129,6 +129,28 @@ def cny_to_usd(p, fx): return p * TROY / fx
 def usd_to_cny(p, fx): return p * fx / TROY
 
 
+def _empty_price_df():
+    """Typed empty [date, price] frame for the price loaders.
+
+    A bare pd.DataFrame(columns=[...]) is object-typed. pandas 3 no longer ignores
+    empty frames when concat() resolves dtypes, so one failed source turns the whole
+    date column into object and .dt raises AttributeError.
+    """
+    return pd.DataFrame({"date":  pd.Series(dtype="datetime64[ns]"),
+                         "price": pd.Series(dtype="float64")})
+
+
+def _concat_prices(*frames):
+    """Concat [date, price] frames: skip empties, enforce datetime/float dtypes."""
+    parts = [f[["date", "price"]] for f in frames if f is not None and not f.empty]
+    if not parts:
+        return _empty_price_df()
+    out = pd.concat(parts, ignore_index=True)
+    out["date"]  = pd.to_datetime(out["date"], errors="coerce")
+    out["price"] = pd.to_numeric(out["price"], errors="coerce")
+    return out.dropna(subset=["date", "price"]).reset_index(drop=True)
+
+
 def _parse_sge_html(html: str) -> list[dict]:
     """Parse SGE daily report HTML. Tracks date across rowspan cells."""
     soup = BeautifulSoup(html, "html.parser")
@@ -218,7 +240,7 @@ def get_sge_history_actual():
         df_csv = df_csv.rename(columns={"close_rmb_g": "price"})
         df_csv["date"] = pd.to_datetime(df_csv["date"]).dt.normalize()
     except Exception:
-        df_csv = pd.DataFrame(columns=["date", "price"])
+        df_csv = _empty_price_df()
 
     csv_end = df_csv["date"].max() if not df_csv.empty else pd.Timestamp("2023-12-31")
 
@@ -244,9 +266,9 @@ def get_sge_history_actual():
                      .rename(columns={"close": "price"}))
         df_live["date"] = pd.to_datetime(df_live["date"]).dt.normalize()
     else:
-        df_live = pd.DataFrame(columns=["date", "price"])
+        df_live = _empty_price_df()
 
-    return (pd.concat([df_csv, df_live], ignore_index=True)
+    return (_concat_prices(df_csv, df_live)
               .sort_values("date")
               .drop_duplicates("date")
               .reset_index(drop=True))
@@ -268,14 +290,14 @@ def get_sge_history_graph_api():
         data = r.json()
         rows = data.get("time", [])
         if not rows:
-            return pd.DataFrame(columns=["date", "price"])
+            return _empty_price_df()
         df = pd.DataFrame(rows, columns=["date", "open", "close", "low", "high"])
         df["date"]  = pd.to_datetime(df["date"], errors="coerce")
         df["price"] = pd.to_numeric(df["close"], errors="coerce")
         df = df.dropna(subset=["date", "price"])
         return df[["date", "price"]].sort_values("date").drop_duplicates("date").reset_index(drop=True)
     except Exception:
-        return pd.DataFrame(columns=["date", "price"])
+        return _empty_price_df()
 
 
 # ── FRED DEXCHUS — historical USD/CNY (cached 24h) ────────────────────────────
@@ -314,7 +336,7 @@ def get_gold_history_fred():
         df["date"] = pd.to_datetime(df["date"])
         return df
     except Exception:
-        return pd.DataFrame(columns=["date", "price"])
+        return _empty_price_df()
 
 
 # ── Full COMEX history from yfinance (cached 24h) — primary source ────────────
@@ -338,7 +360,7 @@ def get_gold_history_recent():
         df["date"] = pd.to_datetime(df["date"]).dt.normalize()
         return df[["date", "price"]].sort_values("date").drop_duplicates("date").reset_index(drop=True)
     except Exception:
-        return pd.DataFrame(columns=["date", "price"])
+        return _empty_price_df()
 
 
 # ── Recent FX history from yfinance (cached 1h) — bridges FRED DEXCHUS lag ────
@@ -483,7 +505,7 @@ fx_hist      = _merge_history(fx_hist_fred,  fx_hist_recent,  "fx")
 # English API + CSV covers Jan 2024+ and is more granular — it wins on any date overlap.
 # Use graph API for ALL dates (not just pre-2024), so recent months are always covered
 # even if the CSV hasn't been updated or the live extension fails.
-sge_actual_combined = (pd.concat([sge_graph, sge_actual], ignore_index=True)
+sge_actual_combined = (_concat_prices(sge_graph, sge_actual)
                          .sort_values("date").drop_duplicates("date", keep="last")
                          .reset_index(drop=True))
 # Threshold for estimation: everything before the earliest actual SGE date gets estimated.
@@ -607,7 +629,7 @@ if not fx_hist.empty:
         actual_dates = set(sge_actual_combined["date"].dt.normalize())
         sge_est = sge_est[~sge_est["date"].isin(actual_dates)]
 else:
-    sge_est = pd.DataFrame(columns=["date", "price"])
+    sge_est = _empty_price_df()
 
 # ── Filter all series to selected period ──────────────────────────────────────
 sge_est_plot    = sge_est[sge_est["date"] >= cutoff].copy()
