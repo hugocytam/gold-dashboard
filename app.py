@@ -713,9 +713,9 @@ if not sge_actual_combined.empty:
     a_start = sge_actual_combined["date"].min().strftime("%b %Y")
     a_end   = sge_actual_combined["date"].max().strftime("%b %Y")
     st.caption(
-        f"Gold = actual SGE Au99.99 closes ({a_start} – {a_end})  ·  "
+        f"Gold = actual SGE Au99.99 closes ({a_start} to {a_end})  ·  "
         f"Blue = COMEX/LBMA (paper gold, converted to {y_title})  ·  "
-        f"Toggle "Show estimated" to see COMEX×FX proxy for dates before {a_start}."
+        f"Tick 'Show estimated' to see COMEX×FX proxy for dates before {a_start}."
     )
 elif show_est and not sge_est_plot.empty:
     st.caption(
