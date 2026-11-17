@@ -587,12 +587,19 @@ with c3:
 st.divider()
 
 # ── Price history chart ────────────────────────────────────────────────────────
-ch_head, ch_period = st.columns([2, 5])
+ch_head, ch_period, ch_est = st.columns([2.2, 4.5, 1.8])
 with ch_head:
-    st.subheader("Price History")
+    st.subheader("SGE vs COMEX")
 with ch_period:
     period = st.radio("period", ["1M", "6M", "YTD", "1Y", "5Y", "All"],
                       horizontal=True, index=3, label_visibility="collapsed")
+with ch_est:
+    show_est = st.checkbox(
+        "Show estimated",
+        value=False,
+        help="Show COMEX×FX proxy for dates before actual SGE data begins. "
+             "Unchecked = actual data only.",
+    )
 
 today  = pd.Timestamp.now().normalize()
 cutoff = {
@@ -654,14 +661,14 @@ else:
 
 fig = go.Figure()
 
-# Trace 1: SGE estimated (pre-Dec 2016) — dashed gold
-if not sge_est_plot.empty:
+# Trace 1: SGE estimated — dashed gold (only shown when "Show estimated" is checked)
+if show_est and not sge_est_plot.empty:
     fig.add_trace(go.Scatter(
         x=sge_est_plot["date"], y=sge_est_plot["price"],
         name="SGE Estimated (COMEX × FRED FX, where actual unavailable)",
         line=dict(color=gold, width=1.5, dash="dot"),
         mode="lines",
-        opacity=0.65,
+        opacity=0.55,
         hovertemplate=f"SGE est.: {hover_fmt}<extra></extra>",
     ))
 
@@ -676,12 +683,13 @@ if not sge_actual_plot.empty:
     ))
 
 # Trace 3: COMEX/LBMA — blue
+cx_label = f"COMEX/LBMA Paper Gold ({y_title})"
 fig.add_trace(go.Scatter(
     x=cx_plot["date"], y=cx_plot["price"],
-    name="COMEX/LBMA Paper Gold (USD/oz)",
-    line=dict(color=blue, width=2),
+    name=cx_label,
+    line=dict(color=blue, width=2.5),
     mode="lines",
-    hovertemplate=f"COMEX/LBMA: {hover_fmt}<extra></extra>",
+    hovertemplate=f"COMEX: {hover_fmt}<extra></extra>",
 ))
 
 fig.update_layout(
@@ -701,16 +709,17 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-if not sge_est_plot.empty:
-    if not sge_actual_combined.empty:
-        a_start = sge_actual_combined["date"].min().strftime("%b %Y")
-        a_end   = sge_actual_combined["date"].max().strftime("%b %Y")
-        est_note = f"Solid gold = actual SGE Au99.99 ({a_start} – {a_end})."
-    else:
-        est_note = "Actual SGE data unavailable — full series is estimated."
+if not sge_actual_combined.empty:
+    a_start = sge_actual_combined["date"].min().strftime("%b %Y")
+    a_end   = sge_actual_combined["date"].max().strftime("%b %Y")
     st.caption(
-        f"⚠️ Dotted gold = SGE estimated (COMEX/LBMA × FRED DEXCHUS USD/CNY ÷ 31.1035) "
-        f"for all dates without actual SGE data. {est_note}"
+        f"Gold = actual SGE Au99.99 closes ({a_start} – {a_end})  ·  "
+        f"Blue = COMEX/LBMA (paper gold, converted to {y_title})  ·  "
+        f"Toggle "Show estimated" to see COMEX×FX proxy for dates before {a_start}."
+    )
+elif show_est and not sge_est_plot.empty:
+    st.caption(
+        "⚠️ Actual SGE data unavailable — full series is estimated (COMEX/LBMA × FRED DEXCHUS ÷ 31.1035)."
     )
 
 st.divider()
